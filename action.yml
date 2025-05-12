@@ -37,8 +37,7 @@ runs:
     - name: Copy Assets (if exists)
       run: | 
         if (Test-Path "${{ env.app-path }}/wwwroot/assets") {
-            $dst = Get-ChildItem "${{ inputs.to-dir }}${{ env.WWWROOT_PATH }}"
-            Select-Object -First 1 -Expand FullName     
+            $dst = Get-ChildItem "${{ inputs.to-dir }}${{ env.WWWROOT_PATH }}" | Select-Object -First 1 -ExpandProperty FullName     
             Copy-Item -Path "${{ env.app-path }}/wwwroot/assets" -Destination "$($dst)" -recurse -Force
         }
       shell: powershell
