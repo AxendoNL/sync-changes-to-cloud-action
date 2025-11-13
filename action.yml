@@ -1,49 +1,113 @@
-name: 'Synchronize changes to cloud'
-description: 'Synchronize changes to cloud'
+name: 'Synchronize changes to cloud via Deployment API'
+description: 'Synchronize changes to cloud using Umbraco Cloud Deployment API v2'
 inputs:
-  cloud-repository-url:
-    description: 'Url of the cloud repository to sync'
+  project-id:
+    description: 'Umbraco Cloud Project ID'
+    required: true
+  api-key:
+    description: 'Umbraco Cloud API Key'
+    required: true
+  target-environment-alias:
+    description: 'Target environment alias (e.g., live, staging)'
     required: true
   from-dir:
     description: 'Path to the current repository directory'
     required: true
-  to-dir:
-    description: 'Path to the sync repository directory'
-    required: true
+  no-build-and-restore:
+    description: 'Skip build and restore on cloud (0 for false, 1 for true)'
+    required: false
+    default: '0'
+  skip-version-check:
+    description: 'Skip version check (0 for false, 1 for true)'
+    required: false
+    default: '0'
+  frontend-directory:
+    description: 'Frontend directory to exclude from zip'
+    required: false
+    default: ''
+  vue-directory:
+    description: 'Vue directory to exclude from zip'
+    required: false
+    default: ''
 runs:
   using: "composite"
   steps:
-    - name: Clone cloud repo
-      run: git clone ${{ inputs.cloud-repository-url}} ${{ inputs.to-dir }}
-      shell: powershell
-      
-      #substitute production appsettings entries to appsettings json file
+    # Switch the gitignore files so cloud does not ignore the build frontend assets
+    - name: Prepare Cloud Git Ignore
+      run: |
+        echo "switching .gitignore with cloud.gitignore"
+        if (Test-Path "${{ inputs.from-dir }}/cloud.gitignore") {
+          Copy-Item -Path "${{ inputs.from-dir }}/cloud.gitignore" -Destination "${{ inputs.from-dir }}/.gitignore" -Force
+        }
+      shell: pwsh
+
+    # Substitute production appsettings entries to appsettings json file
     - name: App Settings Variable Substitution
       uses: microsoft/variable-substitution@v1
       with:
         files: '${{ inputs.from-dir }}/**/appsettings.json'
       env:
         Umbraco.CMS.RuntimeMinification.version: ${{github.run_number}}
-        
-    - name: Run KuduSync.Net
-      run: C:\.\DeploymentScripts\RunKuduSyncNet.ps1 "${{ inputs.from-dir }}" "${{ inputs.to-dir }}" "${{ env.TO_CLOUD_KUDUSYNC_IGNORE }}" "${{github.run_number}}"
-      shell: powershell
-      
-    - name: Create wwwroot .gitignore
+
+    # Zip everything, except what is defined in the 'cloud.zipignore'
+    - name: Zip Source Code
+      id: zip-source
       run: |
-        New-Item -Path ${{ inputs.to-dir }}${{ env.WWWROOT_PATH }} -Name ".gitignore" -Value "${{ env.WWWROOT_GITIGNORE_RULES }}" -Force
-      shell: powershell
-      
-    - name: Copy Assets (if exists)
-      run: | 
-        if (Test-Path "${{ env.app-path }}/wwwroot/assets") {
-            $dst = Get-ChildItem "${{ inputs.to-dir }}${{ env.WWWROOT_PATH }}" | Select-Object -First 1 -ExpandProperty FullName     
-            Copy-Item -Path "${{ env.app-path }}/wwwroot/assets" -Destination "$($dst)" -recurse -Force
+        echo "Packing artifact for upload"
+        cd "${{ inputs.from-dir }}"
+
+        $excludeArgs = @()
+        if (Test-Path "cloud.zipignore") {
+          $excludeArgs += "-x@cloud.zipignore"
         }
-      shell: powershell
-      
-    - name: Commit and push to Cloud
-      run: |
-            cd ${{ inputs.to-dir }}
-            C:\.\DeploymentScripts\CommitAndPushToCloud.ps1 "${{github.run_number}}"
-      shell: powershell
+
+        # Exclude frontend and vue directories if specified
+        if ("${{ inputs.frontend-directory }}" -ne "") {
+          $excludeArgs += "-x"
+          $excludeArgs += "${{ inputs.frontend-directory }}/*"
+        }
+        if ("${{ inputs.vue-directory }}" -ne "") {
+          $excludeArgs += "-x"
+          $excludeArgs += "${{ inputs.vue-directory }}/*"
+        }
+
+        zip -r sources.zip . $excludeArgs
+        echo "Artifact packed successfully"
+      shell: pwsh
+
+    # Upload zipped artifact to Umbraco Cloud
+    - name: Upload Deployment Artifact
+      id: upload-artifact
+      shell: pwsh
+      run: >
+        ${{ inputs.from-dir }}/.github/powershell/Add-DeploymentArtifact.ps1
+        -ProjectId ${{ inputs.project-id }}
+        -ApiKey ${{ inputs.api-key }}
+        -FilePath ${{ inputs.from-dir }}/sources.zip
+        -Description "Artifact for ${{github.run_number}}"
+        -Version "${{github.run_number}}"
+        -PipelineVendor GITHUB
+
+    # Start deployment to target environment
+    - name: Start Deployment
+      id: start-deployment
+      shell: pwsh
+      run: >
+        ${{ inputs.from-dir }}/.github/powershell/Start-Deployment.ps1
+        -ProjectId ${{ inputs.project-id }}
+        -ApiKey ${{ inputs.api-key }}
+        -ArtifactId ${{ steps.upload-artifact.outputs.artifactId }}
+        -TargetEnvironmentAlias ${{ inputs.target-environment-alias }}
+        -CommitMessage "Run number ${{github.run_number}}"
+        -NoBuildAndRestore $${{ inputs.no-build-and-restore }}
+        -SkipVersionCheck $${{ inputs.skip-version-check }}
+        -PipelineVendor GITHUB
+
+    # Wait for deployment to complete
+    - name: Wait for Deployment Completion
+      shell: pwsh
+      run: >
+        ${{ inputs.from-dir }}/.github/powershell/Test-DeploymentStatus.ps1
+        -ProjectId ${{ inputs.project-id }}
+        -ApiKey ${{ inputs.api-key }}
+        -DeploymentId ${{ steps.start-deployment.outputs.deploymentId }}
