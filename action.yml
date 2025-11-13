@@ -99,8 +99,8 @@ runs:
         -ArtifactId ${{ steps.upload-artifact.outputs.artifactId }}
         -TargetEnvironmentAlias ${{ inputs.target-environment-alias }}
         -CommitMessage "Run number ${{github.run_number}}"
-        -NoBuildAndRestore $${{ inputs.no-build-and-restore }}
-        -SkipVersionCheck $${{ inputs.skip-version-check }}
+        -NoBuildAndRestore ${{ inputs.no-build-and-restore }}
+        -SkipVersionCheck ${{ inputs.skip-version-check }}
         -PipelineVendor GITHUB
 
     # Wait for deployment to complete
